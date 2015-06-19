@@ -6,7 +6,7 @@ library(splines)
 
 
 fit_model <- function(train, opts = numeric()) {
-  num_subtypes <- get_option(opts, "num_subtypes", 6)
+  num_subtypes <- get_option(opts, "num_subtypes", 8)
   num_coef     <- get_option(opts, "num_coef", 6)
   degree       <- get_option(opts, "degree", 2)
   v_const      <- get_option(opts, "v_const", 16.0)
@@ -28,19 +28,92 @@ fit_model <- function(train, opts = numeric()) {
   logliks <- lapply(train, make_loglik, basis, kernel)
 
   ## Initialize the parameters
+  b0 <- numeric(length(train[[1]][["pop_feat"]]))
   ytrain <- combine(train, "y", .a = "c")
   nq <- num_subtypes + 2
-  b0 <- quantile(ytrain, seq(0, 1, length.out = nq))[-c(1, nq)]
-  B0 <- t(matrix(rev(b0), ncol = num_coef, nrow = num_subtypes))
+  Bq <- quantile(ytrain, seq(0, 1, length.out = nq))[-c(1, nq)]
+  B0 <- t(matrix(rev(Bq), ncol = num_coef, nrow = num_subtypes))
   m0 <- rep(1, num_subtypes) / num_subtypes
 
-  param <- run_em(logliks, B0, m0, precision, max_iter, tol)
+  param <- run_em2(logliks, b0, B0, m0, precision, max_iter, tol)
+
+  #param <- run_em(logliks, b0, B0, m0, precision, max_iter, tol)
 
   list(basis = basis, kernel = kernel, param = param)
 }
 
 
-run_em <- function(logliks, B0, m0, precision, max_iter, tol) {
+run_em2 <- function(logliks, b0, B0, m0, precision, max_iter, tol) {
+  N <- length(logliks)
+  ith_logl <- function(i) logliks[[i]][["loglik"]]
+  ith_b_ss <- function(i) logliks[[i]][["pop_suffstat"]]
+  ith_B_ss <- function(i) logliks[[i]][["sub_suffstat"]]
+  ith_m_ss <- function(i) logliks[[i]][["marg_suffstat"]]
+
+  do_estep <- function(b, B, m) {
+    all_logl <- lapply(1:N, function(i) ith_logl(i)(b, B, m))
+    list(
+      b = b, B = B, m = m
+    , total_logl = combine(all_logl, "observed", .reduce = "+")
+    , posteriors = combine(all_logl, "posterior")
+    )
+  }
+
+  do_mstep <- function(estep) {
+    pst <- estep[["posteriors"]]
+
+    m_ss <- lapply(1:N, function(i) ith_m_ss(i)(pst[[i]]))
+    m    <- fit_marg(m_ss)
+
+    b <- estep$b
+    B <- estep$B
+
+    for (iter in 1:max_iter) {
+      old_b <- b
+      old_B <- B
+
+      b_ss <- lapply(1:N, function(i) ith_b_ss(i)(B, pst[[i]]))
+      b    <- fit_pop_coef(b_ss)
+
+      for (j in 1:ncol(B)) {
+        Bj_ss  <- lapply(1:N, function(i) ith_B_ss(i)(b, j, pst[[i]]))
+        B[, j] <- fit_sub_coef(Bj_ss, precision)
+      }
+
+      db <- frobenius(b - old_b)
+      dB <- frobenius(B - old_B)
+      if (iter %% 10 == 0) {
+        msg("M-step loop (%04d): db=%.03f, dB=%.03f", iter, db, dB)
+      }
+      if (mean(c(db, dB)) < tol) {
+        break
+      }
+    }
+
+    list(b = b, B = B, m = m)
+  }
+
+  estep <- do_estep(b0, B0, m0)
+  msg("Init LL=%.04f", estep[["total_logl"]])
+
+  for (iter in 1:max_iter) {
+    new_param <- do_mstep(estep)
+    b <- new_param[["b"]]
+    B <- new_param[["B"]]
+    m <- new_param[["m"]]
+
+    ll_old <- estep[["total_logl"]]
+    estep <- do_estep(b, B, m)
+    delta <- (estep[["total_logl"]] - ll_old) / abs(ll_old)
+    msg("%04d LL=%.04f, Convergence=%.04f", iter, estep[["total_logl"]], delta)
+    if (delta < tol) break
+  }
+
+  list(b = b, B = B, m = m)
+}
+
+
+run_em <- function(logliks, b0, B0, m0, precision, max_iter, tol) {
   ss <- lapply(logliks, do.call, list(B = B0, m = m0))
   ll <- combine(ss, "obs_logl", .r = "+")
   msg("Init LL=%.04f", ll)
@@ -58,6 +131,20 @@ run_em <- function(logliks, B0, m0, precision, max_iter, tol) {
   }
 
   list(B = B, m = m)
+}
+
+
+fit_pop_coef <- function(ss) {
+  XX <- combine(ss, "XX", .reduce = "+")
+  Xy <- combine(ss, "Xy", .reduce = "+")
+  c(solve(XX, Xy))
+}
+
+
+fit_sub_coef <- function(ss, precision) {
+  XX <- precision + combine(ss, "XX", .reduce = "+")
+  Xy <- combine(ss, "Xy", .reduce = "+")
+  c(solve(XX, Xy))
 }
 
 
@@ -81,7 +168,7 @@ fit_coefficients <- function(ss, precision) {
 }
 
 
-fit_marginal <- function(ss) {
+fit_marg <- function(ss) {
   Z <- combine(ss, "posterior", .a = "rbind")
   X <- combine(ss, "features", .a = "rbind")
   capture.output(m <- multinom(Z ~ ., X))
@@ -95,19 +182,22 @@ make_loglik <- function(datum, basis, kernel) {
 
   x <- datum[["x"]]
   y <- datum[["y"]]
-  features <- datum[["features"]]
-  df_feats <- as.data.frame(as.list(features))
+  pop_feat <- datum[["pop_feat"]]
+  sub_feat <- datum[["sub_feat"]]
 
-  X <- basis(x)
+  pop_X <- t(replicate(length(x), pop_feat))
+  sub_X <- basis(x)
+  sub_feat_df <- as.data.frame(as.list(sub_feat))
   K <- kernel(x)
 
-  XX <- t(X) %*% solve(K, X)
+  pop_XX <- t(pop_X) %*% solve(K, pop_X)
+  sub_XX <- t(sub_X) %*% solve(K, sub_X)
 
   lp_subtype <- function(m) {
     if (is.vector(m)) {
       p <- m
     } else {
-      p <- predict(m, df_feats, type = "probs")
+      p <- predict(m, sub_feat_df, type = "probs")
     }
     log(c(p))
   }
@@ -116,26 +206,46 @@ make_loglik <- function(datum, basis, kernel) {
     dmvnorm(y, yhat, K, log = TRUE)
   }
 
-  loglik <- function(B, m) {
+  loglik <- function(b, B, m) {
     ll <- lp_subtype(m)
     for (i in 1:ncol(B)) {
-      ll[i] <- ll[i] + lp_markers(c(X %*% B[, i]))
+      yhat <- c(pop_X %*% b + sub_X %*% B[, i])
+      ll[i] <- ll[i] + lp_markers(yhat)
     }
-    list(observed = logsumexp(ll), complete = ll)
+    obs <- logsumexp(ll)
+    pos <- exp(ll - obs)
+    list(observed = obs, complete = ll, posterior = pos)
   }
 
-  suffstat <- function(B, m) {
-    logl <- loglik(B, m)
+  b_suffstat <- function(B, posterior) {
+    yhat <- sub_X %*% B %*% posterior
     list(
-      obs_logl  = logl[["observed"]]
-    , posterior = exp(logl[["complete"]] - logl[["observed"]])
-    , features  = df_feats
-    , XX = XX
-    , Xy = t(X) %*% c(solve(K, y))
+      XX = pop_XX
+    , Xy = t(pop_X) %*% solve(K, y - yhat)
     )
   }
 
-  suffstat
+  B_suffstat <- function(b, z, posterior) {
+    yhat <- pop_X %*% b
+    list(
+      XX = posterior[z] * sub_XX
+    , Xy = posterior[z] * t(sub_X) %*% solve(K, y - yhat)
+    )
+  }
+
+  m_suffstat <- function(posterior) {
+    list(
+      posterior = posterior
+    , features  = sub_feat_df
+    )
+  }
+
+  list(
+    loglik        = loglik
+  , pop_suffstat  = b_suffstat
+  , sub_suffstat  = B_suffstat
+  , marg_suffstat = m_suffstat
+  )
 }
 
 
@@ -215,7 +325,8 @@ make_datum <- function(patient_tbl) {
     ptid     = patient_tbl[["ptid"]][1]
   , x        = patient_tbl[["years_seen_full"]]
   , y        = patient_tbl[["pfvc"]]
-  , features = model.matrix(~ female+afram+aca+scl-1, patient_tbl)[1, ]
+  , sub_feat = model.matrix(~ female+afram+aca+scl-1, patient_tbl)[1, ]
+  , pop_feat = model.matrix(~ female+afram-1, patient_tbl)[1, ]
   )
 }
 
@@ -244,6 +355,11 @@ logsumexp <- function(x) {
 
 msg <- function(m, ...) {
   message(sprintf(m, ...))
+}
+
+
+frobenius <- function(x) {
+  norm(as.matrix(x), "F")
 }
 
 
