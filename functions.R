@@ -5,52 +5,69 @@ library(nnet)
 library(splines)
 
 
-main <- function(opts = numeric()) {
+fit_model <- function(train, opts = numeric()) {
   num_subtypes <- get_option(opts, "num_subtypes", 6)
-  num_coef     <- get_option(opts, "num_coef", 8)
+  num_coef     <- get_option(opts, "num_coef", 6)
   degree       <- get_option(opts, "degree", 2)
-  v_const      <- get_option(opts, "v_const", 36.0)
+  v_const      <- get_option(opts, "v_const", 16.0)
   v_ou         <- get_option(opts, "v_ou", 25.0)
   l_ou         <- get_option(opts, "l_ou", 3.0)
+  lambda       <- get_option(opts, "lambda", 1e-1)
   max_iter     <- get_option(opts, "max_iter", 25)
-
-  pfvc <- read_csv("data/benchmark_pfvc.csv")
-  data <- group_by(pfvc, ptid) %>% do(datum = make_datum(.))
-  train <- data[["datum"]]
+  tol          <- get_option(opts, "tol", 1e-4)
 
   ## Create the basis function.
-  knots <- choose_knots(combine(train, "x", .a=c), num_coef, degree)
+  knots <- quantile_knots(combine(train, "x", .a=c), num_coef, degree)
   basis <- make_basis(knots, degree)
+  precision <- lambda * penalty(basis)
 
   ## Create the covariance kernel.
   kernel <- make_kernel(v_const, v_ou, l_ou)
 
-  ## Create the likelihood functions.
-  train_logliks <- lapply(train, make_loglik, basis, kernel)
+  ## Create the log-likelihood functions.
+  logliks <- lapply(train, make_loglik, basis, kernel)
 
-  B <- matrix(rnorm(num_coef * num_subtypes), num_coef, num_subtypes)
-  m <- rep(1, num_subtypes) / num_subtypes
-  ss <- lapply(train_logliks, do.call, list(B=B, m=m))
+  ## Initialize the parameters
+  ytrain <- combine(train, "y", .a = "c")
+  nq <- num_subtypes + 2
+  b0 <- quantile(ytrain, seq(0, 1, length.out = nq))[-c(1, nq)]
+  B0 <- t(matrix(rev(b0), ncol = num_coef, nrow = num_subtypes))
+  m0 <- rep(1, num_subtypes) / num_subtypes
+
+  param <- run_em(logliks, B0, m0, precision, max_iter, tol)
+
+  list(basis = basis, kernel = kernel, param = param)
+}
+
+
+run_em <- function(logliks, B0, m0, precision, max_iter, tol) {
+  ss <- lapply(logliks, do.call, list(B = B0, m = m0))
   ll <- combine(ss, "obs_logl", .r = "+")
   msg("Init LL=%.04f", ll)
 
   for (iter in 1:max_iter) {
-    B <- fit_coefficients(ss)
+    B <- fit_coefficients(ss, precision)
     m <- fit_marginal(ss)
-    ss <- lapply(train_logliks, do.call, list(B=B, m=m))
+    ss <- lapply(logliks, do.call, list(B = B, m = m))
+
+    ll_old <- ll
     ll <- combine(ss, "obs_logl", .r = "+")
-    msg("%03d LL=%.04f", iter, ll)
+    delta <- (ll - ll_old) / abs(ll_old)
+    msg("%04d LL=%.04f, Convergence=%.04f", iter, ll, delta)
+    if (delta < tol) break
   }
+
+  list(B = B, m = m)
 }
 
 
-fit_coefficients <- function(ss, precision = 1.0) {
+fit_coefficients <- function(ss, precision) {
   num_subtypes <- length(ss[[1]][["posterior"]])
   num_coef <- nrow(ss[[1]][["XX"]])
   B <- matrix(NA, num_coef, num_subtypes)
 
   for (i in 1:num_subtypes) {
-    XX <- diag(precision, num_coef)
+    XX <- precision
     Xy <- numeric(num_coef)
     for (j in seq_along(ss)) {
       wj <- ss[[j]][["posterior"]][i]
@@ -85,7 +102,6 @@ make_loglik <- function(datum, basis, kernel) {
   K <- kernel(x)
 
   XX <- t(X) %*% solve(K, X)
-  Xy <- t(X) %*% c(solve(K, y))
 
   lp_subtype <- function(m) {
     if (is.vector(m)) {
@@ -115,7 +131,7 @@ make_loglik <- function(datum, basis, kernel) {
     , posterior = exp(logl[["complete"]] - logl[["observed"]])
     , features  = df_feats
     , XX = XX
-    , Xy = Xy
+    , Xy = t(X) %*% c(solve(K, y))
     )
   }
 
@@ -142,19 +158,29 @@ make_basis <- function(knots, degree) {
 
 num_bases <- function(basis) {
   e <- environment(basis)
-  with(e, spline_df(interior_knots, degree))
+  with(e, length(interior_knots) + degree + 1)
 }
 
 
-choose_knots <- function(x, num_coef, degree) {
+penalty <- function(basis) {
+  n <- num_bases(basis)
+  D <- diag(1.0, n)
+  D <- diff(D)
+  t(D) %*% D
+}
+
+
+quantile_knots <- function(x, num_coef, degree) {
   num_interior <- num_coef - degree - 1
   num_knots <- num_interior + 2
   unname(quantile(x, seq(0, 1, length.out = num_knots)))
 }
 
 
-spline_df <- function(k, d) {
-  lenght(k) + d + 1
+uniform_knots <- function(x, num_coef, degree) {
+  num_interior <- num_coef - degree - 1
+  num_knots <- num_interior + 2
+  seq(min(x), max(x), length.out = num_knots)
 }
 
 
