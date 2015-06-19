@@ -206,6 +206,7 @@ combine <- function(structs, field, .reduce = NULL, .apply = NULL) {
   if (!is.null(.apply)) {
     return(do.call(match.fun(.apply), vals))
   }
+  vals
 }
 
 
