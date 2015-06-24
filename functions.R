@@ -1,23 +1,74 @@
 library(readr)
 library(dplyr)
+library(ggplot2)
 library(mvtnorm)
 library(nnet)
 library(splines)
+
+
+apply_model <- function(datum, model, xnew) {
+  loglik <- make_loglik(datum, model$basis, model$kernel)
+  ll <- loglik[["loglik"]](model$param$b, model$param$B, model$param$m)
+  if (!missing(xnew)) {
+    yhat_new <- predict_means(xnew, datum, model)
+    ycov_new <- model$kernel(xnew)
+
+    if (length(datum[["x"]]) > 0) {
+      yhat_old <- predict_means(datum[["x"]], datum, model)
+      for (i in 1:ncol(yhat_new)) {
+        yres <- c(datum[["y"]] - yhat_old[, i])
+        gpp <- gp_posterior(xnew, datum[["x"]], yres, model$kernel)
+        yhat_new[, i] <- yhat_new[, i] + gpp$mean
+        ycov_new <- gpp$covariance
+      }
+    }
+    output <- list(
+      likelihood = ll$observed
+    , posterior  = ll$posterior
+    , ynew_hat   = yhat_new
+    , ynew_cov   = ycov_new
+    )
+
+  } else {
+    output <- list(
+      likelihood = ll$observed
+    , posterior  = ll$posterior
+    , ynew_hat   = NULL
+    , ynew_cov   = NULL
+    )
+  }
+  output
+}
+
+
+predict_means <- function(x, datum, model) {
+  pop_X <- t(replicate(length(x), datum[["pop_feat"]]))
+  sub_X <- model$basis(x)
+  c(pop_X %*% model$param$b) + sub_X %*% model$param$B
+}
 
 
 fit_model <- function(train, opts = numeric()) {
   num_subtypes <- get_option(opts, "num_subtypes", 8)
   num_coef     <- get_option(opts, "num_coef", 6)
   degree       <- get_option(opts, "degree", 2)
+  xlo          <- get_option(opts, "xlo", NULL)
+  xhi          <- get_option(opts, "xhi", NULL)
   v_const      <- get_option(opts, "v_const", 16.0)
-  v_ou         <- get_option(opts, "v_ou", 25.0)
-  l_ou         <- get_option(opts, "l_ou", 3.0)
+  v_ou         <- get_option(opts, "v_ou", 36.0)
+  l_ou         <- get_option(opts, "l_ou", 2.0)
   lambda       <- get_option(opts, "lambda", 1e-1)
   max_iter     <- get_option(opts, "max_iter", 25)
   tol          <- get_option(opts, "tol", 1e-4)
 
   ## Create the basis function.
-  knots <- quantile_knots(combine(train, "x", .a=c), num_coef, degree)
+  if (!is.null(xlo) && !is.null(xhi)) {
+    ## knots <- quantile_knots(combine(train, "x", .a = c), num_coef, degree, c(xlo, xhi))
+    knots <- uniform_knots(combine(train, "x", .a = c), num_coef, degree, c(xlo, xhi))
+  } else {
+    ## knots <- quantile_knots(combine(train, "x", .a=c), num_coef, degree)
+    knots <- uniform_knots(combine(train, "x", .a=c), num_coef, degree)
+  }
   basis <- make_basis(knots, degree)
   precision <- lambda * penalty(basis)
 
@@ -35,15 +86,13 @@ fit_model <- function(train, opts = numeric()) {
   B0 <- t(matrix(rev(Bq), ncol = num_coef, nrow = num_subtypes))
   m0 <- rep(1, num_subtypes) / num_subtypes
 
-  param <- run_em2(logliks, b0, B0, m0, precision, max_iter, tol)
-
-  #param <- run_em(logliks, b0, B0, m0, precision, max_iter, tol)
+  param <- run_em(logliks, b0, B0, m0, precision, max_iter, tol)
 
   list(basis = basis, kernel = kernel, param = param)
 }
 
 
-run_em2 <- function(logliks, b0, B0, m0, precision, max_iter, tol) {
+run_em <- function(logliks, b0, B0, m0, precision, max_iter, tol) {
   N <- length(logliks)
   ith_logl <- function(i) logliks[[i]][["loglik"]]
   ith_b_ss <- function(i) logliks[[i]][["pop_suffstat"]]
@@ -113,27 +162,6 @@ run_em2 <- function(logliks, b0, B0, m0, precision, max_iter, tol) {
 }
 
 
-run_em <- function(logliks, b0, B0, m0, precision, max_iter, tol) {
-  ss <- lapply(logliks, do.call, list(B = B0, m = m0))
-  ll <- combine(ss, "obs_logl", .r = "+")
-  msg("Init LL=%.04f", ll)
-
-  for (iter in 1:max_iter) {
-    B <- fit_coefficients(ss, precision)
-    m <- fit_marginal(ss)
-    ss <- lapply(logliks, do.call, list(B = B, m = m))
-
-    ll_old <- ll
-    ll <- combine(ss, "obs_logl", .r = "+")
-    delta <- (ll - ll_old) / abs(ll_old)
-    msg("%04d LL=%.04f, Convergence=%.04f", iter, ll, delta)
-    if (delta < tol) break
-  }
-
-  list(B = B, m = m)
-}
-
-
 fit_pop_coef <- function(ss) {
   XX <- combine(ss, "XX", .reduce = "+")
   Xy <- combine(ss, "Xy", .reduce = "+")
@@ -185,13 +213,21 @@ make_loglik <- function(datum, basis, kernel) {
   pop_feat <- datum[["pop_feat"]]
   sub_feat <- datum[["sub_feat"]]
 
-  pop_X <- t(replicate(length(x), pop_feat))
-  sub_X <- basis(x)
-  sub_feat_df <- as.data.frame(as.list(sub_feat))
   K <- kernel(x)
 
-  pop_XX <- t(pop_X) %*% solve(K, pop_X)
-  sub_XX <- t(sub_X) %*% solve(K, sub_X)
+  if (length(x) > 0) {
+    pop_X <- t(replicate(length(x), pop_feat))
+    pop_XX <- t(pop_X) %*% solve(K, pop_X)
+    sub_X <- basis(x)
+    sub_XX <- t(sub_X) %*% solve(K, sub_X)
+  } else {
+    pop_X <- NULL
+    pop_XX <- NULL
+    sub_X <- NULL
+    sub_XX <- NULL
+  }
+
+  sub_feat_df <- as.data.frame(as.list(sub_feat))
 
   lp_subtype <- function(m) {
     if (is.vector(m)) {
@@ -208,9 +244,11 @@ make_loglik <- function(datum, basis, kernel) {
 
   loglik <- function(b, B, m) {
     ll <- lp_subtype(m)
-    for (i in 1:ncol(B)) {
-      yhat <- c(pop_X %*% b + sub_X %*% B[, i])
-      ll[i] <- ll[i] + lp_markers(yhat)
+    if (length(x) > 0) {
+      for (i in 1:ncol(B)) {
+        yhat <- c(pop_X %*% b + sub_X %*% B[, i])
+        ll[i] <- ll[i] + lp_markers(yhat)
+      }
     }
     obs <- logsumexp(ll)
     pos <- exp(ll - obs)
@@ -280,17 +318,26 @@ penalty <- function(basis) {
 }
 
 
-quantile_knots <- function(x, num_coef, degree) {
+quantile_knots <- function(x, num_coef, degree, boundaries) {
   num_interior <- num_coef - degree - 1
   num_knots <- num_interior + 2
-  unname(quantile(x, seq(0, 1, length.out = num_knots)))
+  knots <- unname(quantile(x, seq(0, 1, length.out = num_knots)))
+  if (!missing(boundaries)) {
+    knots[1] <- boundaries[1]
+    knots[num_knots] <- boundaries[2]
+  }
+  knots
 }
 
 
-uniform_knots <- function(x, num_coef, degree) {
+uniform_knots <- function(x, num_coef, degree, boundaries) {
   num_interior <- num_coef - degree - 1
   num_knots <- num_interior + 2
-  seq(min(x), max(x), length.out = num_knots)
+  if (missing(boundaries)) {
+    seq(min(x), max(x), length.out = num_knots)
+  } else {
+    seq(boundaries[1], boundaries[2], length.out = num_knots)
+  }
 }
 
 
@@ -317,6 +364,18 @@ make_kernel <- function(v_const, v_ou, l_ou) {
 
 ou_covariance <- function(d, v, l) {
   v * exp(- abs(d) / l)
+}
+
+
+gp_posterior <- function(xnew, x, y, cov_fn) {
+  K11 <- cov_fn(xnew)
+  K12 <- cov_fn(xnew, x)
+  K22 <- cov_fn(x)
+
+  yhat <- c(K12 %*% solve(K22, y))
+  ycov <- K11 - K12 %*% solve(K22, t(K12))
+
+  list(mean = yhat, covariance = ycov)
 }
 
 
