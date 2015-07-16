@@ -164,6 +164,7 @@ run_em <- function(logliks, b0, B0, m0, precision, max_iter, tol) {
 
 fit_pop_coef <- function(ss) {
   XX <- combine(ss, "XX", .reduce = "+")
+  XX <- XX + diag(1e-4, nrow(XX))
   Xy <- combine(ss, "Xy", .reduce = "+")
   c(solve(XX, Xy))
 }
