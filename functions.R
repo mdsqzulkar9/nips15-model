@@ -57,6 +57,7 @@ fit_model <- function(train, opts = numeric()) {
   v_const      <- get_option(opts, "v_const", 16.0)
   v_ou         <- get_option(opts, "v_ou", 36.0)
   l_ou         <- get_option(opts, "l_ou", 2.0)
+  v_noise      <- get_option(opts, "v_noise", 1.0)
   lambda       <- get_option(opts, "lambda", 1e-1)
   max_iter     <- get_option(opts, "max_iter", 25)
   tol          <- get_option(opts, "tol", 1e-4)
@@ -73,7 +74,7 @@ fit_model <- function(train, opts = numeric()) {
   precision <- lambda * penalty(basis)
 
   ## Create the covariance kernel.
-  kernel <- make_kernel(v_const, v_ou, l_ou)
+  kernel <- make_kernel(v_const, v_ou, l_ou, v_noise)
 
   ## Create the log-likelihood functions.
   logliks <- lapply(train, make_loglik, basis, kernel)
@@ -342,17 +343,18 @@ uniform_knots <- function(x, num_coef, degree, boundaries) {
 }
 
 
-make_kernel <- function(v_const, v_ou, l_ou) {
+make_kernel <- function(v_const, v_ou, l_ou, v_noise) {
   v_const <- force(v_const)
   v_ou <- force(v_ou)
   l_ou <- force(l_ou)
+  v_noise <- force(v_noise)
 
   function(x1, x2) {
     if (missing(x2)) {
       n <- length(x1)
       matrix(v_const, n, n) +
         ou_covariance(outer(x1, x1, "-"), v_ou, l_ou) +
-        diag(1.0, n)
+        diag(v_noise, n)
     } else {
       n1 <- length(x1)
       n2 <- length(x2)
