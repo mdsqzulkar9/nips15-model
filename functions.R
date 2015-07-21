@@ -41,6 +41,55 @@ apply_model <- function(datum, model, xnew) {
 }
 
 
+plot_model <- function(model) {
+  boundaries <- environment(model$basis)$boundary_knots
+  x <- seq(boundaries[1], boundaries[2], 0.5)
+  X <- model$basis(x)
+  Y <- X %*% model$param$B
+  matplot(x, Y)
+}
+
+
+dump_model <- function(model, directory) {
+  if (!dir.exists(directory)) {
+    dir.create(directory, recursive = TRUE)
+  }
+
+  e <- environment(model$basis)
+  bknots <- e$boundary_knots
+  iknots <- e$interior_knots
+  degree <- e$degree
+  ncoef  <- length(iknots) + degree + 1
+  basis_param <- matrix(c(bknots, degree, ncoef), nrow=1)
+  write.table(basis_param,
+              file.path(directory, "basis.dat"),
+              row.names=FALSE,
+              col.names=FALSE)
+
+  e <- environment(model$kernel)
+  v_const <- e$v_const
+  v_ou    <- e$v_ou
+  l_ou    <- e$l_ou
+  if (exists("v_noise", e)) {
+    v_noise <- e$v_noise
+  } else {
+    v_noise <- 1.0
+  }
+  kernel_param <- matrix(c(v_const, v_ou, l_ou, v_noise), nrow=1)
+  write.table(kernel_param,
+              file.path(directory, "kernel.dat"),
+              row.names=FALSE,
+              col.names=FALSE)
+
+  b <- matrix(model$param$b, nrow=1)
+  B <- t(model$param$B)
+  W <- unname(coef(model$param$m))
+  write.table(b, file.path(directory, "pop.dat"), row.names=FALSE, col.names=FALSE)
+  write.table(B, file.path(directory, "subpop.dat"), row.names=FALSE, col.names=FALSE)
+  write.table(W, file.path(directory, "marginal.dat"), row.names=FALSE, col.names=FALSE)
+}
+
+
 predict_means <- function(x, datum, model) {
   pop_X <- t(replicate(length(x), datum[["pop_feat"]]))
   sub_X <- model$basis(x)
