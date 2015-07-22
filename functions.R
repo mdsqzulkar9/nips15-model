@@ -50,6 +50,19 @@ plot_model <- function(model) {
 }
 
 
+plot_inferences <- function(model, data) {
+  d <- ungroup(data) %>% rowwise %>% do(as.data.frame(.$datum[1:3]))
+  inferences <- lapply(data$datum, apply_model, model)
+  subtypes <- vapply(inferences, function(i) which.max(i$posterior), numeric(1))
+  subtypes <- data.frame(ptid = vapply(data$datum, "[[", numeric(1), "ptid"), subtype = subtypes)
+  d <- inner_join(d, subtypes, "ptid")
+  p <- ggplot(d)
+  p <- p + geom_point(aes(x, y))
+  p <- p + facet_wrap(~ subtype)
+  print(p)
+}
+
+
 dump_model <- function(model, directory) {
   if (!dir.exists(directory)) {
     dir.create(directory, recursive = TRUE)
@@ -97,7 +110,7 @@ predict_means <- function(x, datum, model) {
 }
 
 
-fit_model <- function(train, opts = numeric()) {
+fit_model <- function(train, opts = numeric(), init_model = NULL) {
   num_subtypes <- get_option(opts, "num_subtypes", 8)
   num_coef     <- get_option(opts, "num_coef", 6)
   degree       <- get_option(opts, "degree", 2)
@@ -129,12 +142,19 @@ fit_model <- function(train, opts = numeric()) {
   logliks <- lapply(train, make_loglik, basis, kernel)
 
   ## Initialize the parameters
-  b0 <- numeric(length(train[[1]][["pop_feat"]]))
-  ytrain <- combine(train, "y", .a = "c")
-  nq <- num_subtypes + 2
-  Bq <- quantile(ytrain, seq(0, 1, length.out = nq))[-c(1, nq)]
-  B0 <- t(matrix(rev(Bq), ncol = num_coef, nrow = num_subtypes))
-  m0 <- rep(1, num_subtypes) / num_subtypes
+  init_provided <- !is.null(init_model)
+  if (init_provided) {
+    b0 <- numeric(length(train[[1]][["pop_feat"]]))
+    ytrain <- combine(train, "y", .a = "c")
+    nq <- num_subtypes + 2
+    Bq <- quantile(ytrain, seq(0, 1, length.out = nq))[-c(1, nq)]
+    B0 <- t(matrix(rev(Bq), ncol = num_coef, nrow = num_subtypes))
+    m0 <- rep(1, num_subtypes) / num_subtypes
+  } else {
+    b0 <- init_model$param$b
+    B0 <- init_model$param$B
+    m0 <- init_model$param$m
+  }
 
   param <- run_em(logliks, b0, B0, m0, precision, max_iter, tol)
 
