@@ -356,14 +356,12 @@ class LinearRegressionFactor:
     def __init__(self, num_predictors, covariance_fn):
         self.num_predictors = num_predictors
         self.covariance_fn = covariance_fn
-
-        def basis(x):
-            x = x.ravel()
-            n = x.size
-            return colvec(np.ones(n))
-
         self.num_bases = 1
-        self.basis = basis
+
+    def basis(self, x):
+        x = x.ravel()
+        n = x.size()
+        return colvec(np.ones(n))
 
     @property
     def num_features(self):
