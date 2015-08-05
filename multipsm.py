@@ -360,7 +360,7 @@ class LinearRegressionFactor:
 
     def basis(self, x):
         x = x.ravel()
-        n = x.size()
+        n = x.size
         return colvec(np.ones(n))
 
     @property
