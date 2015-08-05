@@ -144,16 +144,16 @@ fit_model <- function(train, opts = numeric(), init_model = NULL) {
   ## Initialize the parameters
   init_provided <- !is.null(init_model)
   if (init_provided) {
+    b0 <- init_model$param$b
+    B0 <- init_model$param$B
+    m0 <- init_model$param$m
+  } else {
     b0 <- numeric(length(train[[1]][["pop_feat"]]))
     ytrain <- combine(train, "y", .a = "c")
     nq <- num_subtypes + 2
     Bq <- quantile(ytrain, seq(0, 1, length.out = nq))[-c(1, nq)]
     B0 <- t(matrix(rev(Bq), ncol = num_coef, nrow = num_subtypes))
     m0 <- rep(1, num_subtypes) / num_subtypes
-  } else {
-    b0 <- init_model$param$b
-    B0 <- init_model$param$B
-    m0 <- init_model$param$m
   }
 
   param <- run_em(logliks, b0, B0, m0, precision, max_iter, tol)
