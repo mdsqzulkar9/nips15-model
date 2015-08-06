@@ -12,7 +12,7 @@ class MultiPSM:
         self.prior = prior
         self.likelihoods = likelihoods
         self.parameters = parameters
-        self.no_adjust = {}
+        self.no_adjust = no_adjust
         self.penalty = penalty
         self.num_markers = len(likelihoods)
         self.num_subtypes = [lkl.num_subtypes for lkl in self.likelihoods]
